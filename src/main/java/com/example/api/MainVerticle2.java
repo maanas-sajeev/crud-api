@@ -6,7 +6,7 @@ import io.vertx.ext.web.Router;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.ext.web.handler.StaticHandler;
 
-public class MainVerticle extends AbstractVerticle {
+public class MainVerticle2 extends AbstractVerticle {
 
   @Override
   public void start(Promise<Void> startPromise) {
@@ -20,9 +20,9 @@ public class MainVerticle extends AbstractVerticle {
           // Start HTTP server
           vertx.createHttpServer()
               .requestHandler(router)
-              .listen(8888)
+              .listen(8889)
               .onSuccess(http -> {
-                System.out.println("HTTP server running on port 8888");
+                System.out.println("HTTP server running on port 8889");
                 startPromise.complete();
               })
               .onFailure(startPromise::fail);

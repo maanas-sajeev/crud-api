@@ -5,7 +5,7 @@ import io.vertx.core.VertxOptions;
 import io.vertx.core.json.JsonObject;
 import io.vertx.spi.cluster.zookeeper.ZookeeperClusterManager;
 
-public class MainApp {
+public class MainApp2 {
   public static void main(String[] args) {
     // Configure ZooKeeper cluster manager
     JsonObject zkConfig = new JsonObject()
@@ -21,9 +21,9 @@ public class MainApp {
         .withClusterManager(clusterManager)
         .buildClustered()
       .onSuccess(vertx -> {
-        System.out.println("Service 1 cluster initialized");
-        vertx.deployVerticle(new MainVerticle())
-          .onSuccess(id -> System.out.println("MainVerticle deployed successfully with ID: " + id))
+        System.out.println("Service 2 cluster initialized");
+        vertx.deployVerticle(new MainVerticle2())
+          .onSuccess(id -> System.out.println("MainVerticle2 deployed successfully with ID: " + id))
           .onFailure(err -> System.err.println("Deployment failed: " + err.getMessage()));
       })
       .onFailure(err -> {
