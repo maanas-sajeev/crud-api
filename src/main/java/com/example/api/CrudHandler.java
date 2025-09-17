@@ -101,14 +101,15 @@ public class CrudHandler {
     }
 
     /**
-     * Get a resource by ID using cluster-wide AsyncMap
+     * Get a resource by ID using Event Bus communication
      * Both services can store and retrieve IDs
-     * Action determined by 'action' query parameter: 'store' or 'retrieve' (default: retrieve)
+     * Action determined by 'action' query parameter: 'store' or 'retrieve'
+     * (default: retrieve)
      */
     public static void getResourceById(RoutingContext ctx) {
         String id = ctx.pathParam("id");
         String actionParam = ctx.request().getParam("action"); // 'store' or 'retrieve'
-        
+
         if (id == null || id.trim().isEmpty()) {
             RouterUtility.sendBadRequest(ctx, "Resource ID is required");
             return;
@@ -120,77 +121,61 @@ public class CrudHandler {
         // Determine which service this is based on server port
         int serverPort = ctx.request().localAddress().port();
         String serviceName = (serverPort == 8888) ? "Service1" : "Service2";
-        
-        // Get the shared AsyncMaps
-        ctx.vertx().sharedData().<String, String>getAsyncMap("resourceIdClusterMap")
-            .onSuccess(asyncMap -> {
-                ctx.vertx().sharedData().<String, String>getAsyncMap("resourceServiceMap")
-                    .onSuccess(serviceMap -> {
-                        if ("store".equalsIgnoreCase(action)) {
-                            // Store behavior: store the ID and service info
-                            System.out.println("[" + serviceName + "] Storing ID: " + id);
-                            
-                            // Store both the ID and which service stored it
-                            asyncMap.put(id, id)
-                                .compose(v -> serviceMap.put(id, serviceName + ":" + serverPort))
-                                .onSuccess(v -> {
-                                    JsonObject response = new JsonObject()
-                                        .put("stored", id)
-                                        .put("originalPort", serverPort)
-                                        .put("message", "ID stored successfully by " + serviceName);
-                                    RouterUtility.sendJsonResponse(ctx, response);
-                                })
-                                .onFailure(err -> {
-                                    RouterUtility.sendServerError(ctx, "Failed to store ID in cluster map: " + err.getMessage());
-                                });
-                        } else {
-                            // Retrieve behavior: get the ID and original service info
-                            System.out.println("[" + serviceName + "] Retrieving ID: " + id);
-                            
-                            asyncMap.get(id)
-                                .onSuccess(value -> {
-                                    if (value != null) {
-                                        // Get the service info
-                                        serviceMap.get(id)
-                                            .onSuccess(serviceInfo -> {
-                                                if (serviceInfo != null) {
-                                                    String[] parts = serviceInfo.split(":");
-                                                    String originalService = parts.length > 0 ? parts[0] : "Unknown";
-                                                    String originalPort = parts.length > 1 ? parts[1] : "Unknown";
-                                                    
-                                                    JsonObject response = new JsonObject()
-                                                        .put("fetched", value)
-                                                        .put("originalPort", originalPort)
-                                                        .put("message", "ID retrieved successfully (originally stored by " + originalService + ")");
-                                                    RouterUtility.sendJsonResponse(ctx, response);
-                                                } else {
-                                                    JsonObject response = new JsonObject()
-                                                        .put("fetched", value)
-                                                        .put("originalPort", "Unknown")
-                                                        .put("message", "ID retrieved successfully (original service unknown)");
-                                                    RouterUtility.sendJsonResponse(ctx, response);
-                                                }
-                                            })
-                                            .onFailure(err -> {
-                                                RouterUtility.sendServerError(ctx, "Failed to get service info: " + err.getMessage());
-                                            });
-                                    } else {
-                                        System.out.println("[" + serviceName + "] ID not found: " + id);
-                                        RouterUtility.sendNotFound(ctx, "ID '" + id + "' not found. Store it first using ?action=store");
-                                    }
-                                })
-                                .onFailure(err -> {
-                                    RouterUtility.sendServerError(ctx, "Failed to retrieve ID from cluster map: " + err.getMessage());
-                                });
-                        }
+
+        if ("store".equalsIgnoreCase(action)) {
+            // Store behavior: save the ID in the current service's local store
+            System.out.println("[" + serviceName + "] Storing ID: " + id + " in local store");
+
+            if (serverPort == 8888) {
+                MainVerticle.getLocalStore().put(id, id);
+            } else {
+                MainVerticle2.getLocalStore().put(id, id);
+            }
+
+            System.out.println("[" + serviceName + "] ID stored successfully in local store");
+
+            JsonObject response = new JsonObject()
+                    .put("stored", id)
+                    .put("originalPort", serverPort)
+                    .put("message", "ID stored successfully by " + serviceName + " in local store");
+            RouterUtility.sendJsonResponse(ctx, response);
+
+        } else {
+            // Retrieve behavior: send Event Bus request to the other service
+            System.out.println("[" + serviceName + "] Retrieving ID: " + id + " via clustered Event Bus");
+
+            // Send Event Bus request with 30-second timeout
+            ctx.vertx().eventBus().request("resource.lookup", id,
+                    new io.vertx.core.eventbus.DeliveryOptions().setSendTimeout(30000))
+                    .onSuccess(reply -> {
+                        String value = reply.body().toString();
+                        String otherService = (serverPort == 8888) ? "Service2" : "Service1";
+                        int otherPort = (serverPort == 8888) ? 8889 : 8888;
+
+                        System.out.println("[" + serviceName + "] Successfully retrieved from " + otherService
+                                + " via clustered Event Bus: " + value);
+
+                        JsonObject response = new JsonObject()
+                                .put("fetched", value)
+                                .put("originalPort", otherPort)
+                                .put("message",
+                                        "ID retrieved successfully from " + otherService + " via clustered Event Bus");
+                        RouterUtility.sendJsonResponse(ctx, response);
                     })
                     .onFailure(err -> {
-                        RouterUtility.sendServerError(ctx, "Service map unavailable: " + err.getMessage());
+                        System.out.println("[" + serviceName + "] Event Bus request failed: " + err.getMessage());
+                        if (err.getMessage().contains("NO_HANDLERS")) {
+                            RouterUtility.sendServerError(ctx,
+                                    "Timeout: No response from other service via clustered Event Bus");
+                        } else if (err.getMessage().contains("(404)")) {
+                            RouterUtility.sendNotFound(ctx,
+                                    "ID '" + id + "' not found. Store it first using ?action=store");
+                        } else {
+                            RouterUtility.sendServerError(ctx,
+                                    "Timeout: No response from other service via clustered Event Bus");
+                        }
                     });
-            })
-            .onFailure(err -> {
-                RouterUtility.sendServerError(ctx, "Cluster map unavailable: " + err.getMessage());
-            });
+        }
     }
 
     /**

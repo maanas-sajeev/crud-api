@@ -5,11 +5,33 @@ import io.vertx.core.Promise;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.ext.web.handler.StaticHandler;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class MainVerticle2 extends AbstractVerticle {
 
+  // Local in-memory store for Event Bus communication
+  private static final ConcurrentHashMap<String, String> localStore = new ConcurrentHashMap<>();
+
   @Override
   public void start(Promise<Void> startPromise) {
+
+    // Register Event Bus consumer for resource lookup
+    vertx.eventBus().consumer("resource.lookup", message -> {
+      String resourceId = message.body().toString();
+      String value = localStore.get(resourceId);
+
+      System.out.println("[Service2:8889] Received clustered Event Bus lookup request for ID: " + resourceId);
+
+      if (value != null) {
+        System.out.println("[Service2:8889] Found resource locally: " + value);
+        message.reply(value);
+      } else {
+        System.out.println("[Service2:8889] Resource not found in local store");
+        message.fail(404, "Resource not found");
+      }
+    });
+
+    System.out.println("[Service2:8889] Event Bus consumer 'resource.lookup' registered for clustering");
 
     // Initialize DatabaseManager
     DatabaseManager.getInstance().initialize(vertx)
@@ -69,6 +91,13 @@ public class MainVerticle2 extends AbstractVerticle {
         .sendFile("webroot/openapi.yaml"));
 
     return router;
+  }
+
+  /**
+   * Get access to the local store for this verticle
+   */
+  public static ConcurrentHashMap<String, String> getLocalStore() {
+    return localStore;
   }
 
   @Override
