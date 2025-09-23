@@ -12,6 +12,8 @@ servers:
     description: Service 1
   - url: http://localhost:8889
     description: Service 2
+  - url: http://localhost:8890
+    description: Service 3
 
 paths:
   /api/v1/hello:
@@ -168,7 +170,7 @@ paths:
           description: MongoDB ObjectId of the resource
           schema:
             type: string
-            pattern: '^[0-9a-fA-F]{24}$'
+            pattern: "^[0-9a-fA-F]{24}$"
             example: "507f1f77bcf86cd799439011"
       requestBody:
         required: true
@@ -212,7 +214,7 @@ paths:
           description: MongoDB ObjectId of the resource
           schema:
             type: string
-            pattern: '^[0-9a-fA-F]{24}$'
+            pattern: "^[0-9a-fA-F]{24}$"
             example: "507f1f77bcf86cd799439011"
       requestBody:
         required: true
@@ -269,7 +271,7 @@ paths:
           description: MongoDB ObjectId of the resource
           schema:
             type: string
-            pattern: '^[0-9a-fA-F]{24}$'
+            pattern: "^[0-9a-fA-F]{24}$"
             example: "507f1f77bcf86cd799439011"
       responses:
         "204":
@@ -301,7 +303,7 @@ components:
         _id:
           type: string
           description: MongoDB ObjectId
-          pattern: '^[0-9a-fA-F]{24}$'
+          pattern: "^[0-9a-fA-F]{24}$"
           example: "507f1f77bcf86cd799439011"
         name:
           type: string

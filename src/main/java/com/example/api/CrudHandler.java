@@ -101,8 +101,8 @@ public class CrudHandler {
     }
 
     /**
-     * Get a resource by ID using Event Bus communication
-     * Both services can store and retrieve IDs
+     * Get a resource by ID using Event Bus communication only
+     * Both services can store and retrieve IDs via clustered Event Bus
      * Action determined by 'action' query parameter: 'store' or 'retrieve'
      * (default: retrieve)
      */
@@ -123,56 +123,87 @@ public class CrudHandler {
         String serviceName = (serverPort == 8888) ? "Service1" : "Service2";
 
         if ("store".equalsIgnoreCase(action)) {
-            // Store behavior: save the ID in the current service's local store
-            System.out.println("[" + serviceName + "] Storing ID: " + id + " in local store");
+            // Store behavior: use Event Bus to store in clustered services
+            System.out.println("[" + serviceName + "] Storing ID: " + id + " via clustered Event Bus");
 
-            if (serverPort == 8888) {
-                MainVerticle.getLocalStore().put(id, id);
-            } else {
-                MainVerticle2.getLocalStore().put(id, id);
-            }
+            JsonObject storeRequest = new JsonObject()
+                    .put("action", "store")
+                    .put("id", id)
+                    .put("value", id);
 
-            System.out.println("[" + serviceName + "] ID stored successfully in local store");
+            // Send Event Bus request to store the resource
+            ctx.vertx().eventBus().request("resource.store", storeRequest,
+                    new io.vertx.core.eventbus.DeliveryOptions().setSendTimeout(30000))
+                    .onSuccess(reply -> {
+                        JsonObject storeResponse = (JsonObject) reply.body();
+                        String timestamp = storeResponse.getString("timestamp");
+                        System.out.println("[" + serviceName + "] ID stored successfully via clustered Event Bus at: "
+                                + timestamp);
 
-            JsonObject response = new JsonObject()
-                    .put("stored", id)
-                    .put("originalPort", serverPort)
-                    .put("message", "ID stored successfully by " + serviceName + " in local store");
-            RouterUtility.sendJsonResponse(ctx, response);
+                        JsonObject response = new JsonObject()
+                                .put("stored", id)
+                                .put("timestamp", timestamp)
+                                .put("originalPort", storeResponse.getInteger("port"))
+                                .put("source", "ClusteredEventBus")
+                                .put("message", "ID stored successfully via clustered Event Bus at " + timestamp);
+                        RouterUtility.sendJsonResponse(ctx, response);
+                    })
+                    .onFailure(err -> {
+                        System.out.println("[" + serviceName + "] Event Bus store request failed: " + err.getMessage());
+                        RouterUtility.sendServerError(ctx,
+                                "Failed to store via clustered Event Bus: " + err.getMessage());
+                    });
 
         } else {
-            // Retrieve behavior: send Event Bus request to the other service
+            // Retrieve behavior: use Event Bus to search across clustered services
             System.out.println("[" + serviceName + "] Retrieving ID: " + id + " via clustered Event Bus");
 
             // Send Event Bus request with 30-second timeout
             ctx.vertx().eventBus().request("resource.lookup", id,
                     new io.vertx.core.eventbus.DeliveryOptions().setSendTimeout(30000))
                     .onSuccess(reply -> {
-                        String value = reply.body().toString();
-                        String otherService = (serverPort == 8888) ? "Service2" : "Service1";
-                        int otherPort = (serverPort == 8888) ? 8889 : 8888;
+                        JsonObject lookupResponse = (JsonObject) reply.body();
+                        String value = lookupResponse.getString("value");
+                        String timestamp = lookupResponse.getString("timestamp");
+                        int sourcePort = lookupResponse.getInteger("port");
+                        String sourceService = (sourcePort == 8888) ? "Service1" : "Service2";
 
-                        System.out.println("[" + serviceName + "] Successfully retrieved from " + otherService
-                                + " via clustered Event Bus: " + value);
+                        System.out.println("[" + serviceName + "] Successfully retrieved from " + sourceService
+                                + " via clustered Event Bus: " + value + " (stored at: " + timestamp + ")");
 
                         JsonObject response = new JsonObject()
                                 .put("fetched", value)
-                                .put("originalPort", otherPort)
+                                .put("timestamp", timestamp)
+                                .put("originalPort", sourcePort)
+                                .put("source", "ClusteredEventBus")
                                 .put("message",
-                                        "ID retrieved successfully from " + otherService + " via clustered Event Bus");
+                                        "ID retrieved successfully from " + sourceService
+                                                + " via clustered Event Bus (stored at: " + timestamp + ")");
                         RouterUtility.sendJsonResponse(ctx, response);
                     })
                     .onFailure(err -> {
-                        System.out.println("[" + serviceName + "] Event Bus request failed: " + err.getMessage());
+                        System.out
+                                .println("[" + serviceName + "] Event Bus lookup request failed: " + err.getMessage());
+
+                        // Check if it's a ReplyException (from message.fail())
+                        if (err instanceof io.vertx.core.eventbus.ReplyException) {
+                            io.vertx.core.eventbus.ReplyException replyException = (io.vertx.core.eventbus.ReplyException) err;
+                            if (replyException.failureCode() == 404) {
+                                // Resource not found in any service
+                                RouterUtility.sendNotFound(ctx,
+                                        "ID '" + id + "' not found in any service. Store it first using ?action=store");
+                                return;
+                            }
+                        }
+
+                        // Check for NO_HANDLERS (no service available)
                         if (err.getMessage().contains("NO_HANDLERS")) {
                             RouterUtility.sendServerError(ctx,
-                                    "Timeout: No response from other service via clustered Event Bus");
-                        } else if (err.getMessage().contains("(404)")) {
-                            RouterUtility.sendNotFound(ctx,
-                                    "ID '" + id + "' not found. Store it first using ?action=store");
+                                    "No response from clustered services - services may be down");
                         } else {
+                            // Timeout or other errors
                             RouterUtility.sendServerError(ctx,
-                                    "Timeout: No response from other service via clustered Event Bus");
+                                    "Timeout: No response from clustered services via Event Bus after 30 seconds");
                         }
                     });
         }

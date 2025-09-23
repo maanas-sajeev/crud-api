@@ -2,36 +2,23 @@ package com.example.api;
 
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Promise;
+import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.ext.web.handler.StaticHandler;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Comparator;
 
 public class MainVerticle extends AbstractVerticle {
 
-  // Local in-memory store for Event Bus communication
-  private static final ConcurrentHashMap<String, String> localStore = new ConcurrentHashMap<>();
+  // Local in-memory store for Event Bus communication - stores List<JsonObject>
+  // (each with value and timestamp)
+  private static final ConcurrentHashMap<String, List<JsonObject>> localStore = new ConcurrentHashMap<>();
 
   @Override
   public void start(Promise<Void> startPromise) {
-
-    // Register Event Bus consumer for resource lookup
-    vertx.eventBus().consumer("resource.lookup", message -> {
-      String resourceId = message.body().toString();
-      String value = localStore.get(resourceId);
-
-      System.out.println("[Service1:8888] Received clustered Event Bus lookup request for ID: " + resourceId);
-
-      if (value != null) {
-        System.out.println("[Service1:8888] Found resource locally: " + value);
-        message.reply(value);
-      } else {
-        System.out.println("[Service1:8888] Resource not found in local store");
-        message.fail(404, "Resource not found");
-      }
-    });
-
-    System.out.println("[Service1:8888] Event Bus consumer 'resource.lookup' registered for clustering");
 
     // Initialize DatabaseManager
     DatabaseManager.getInstance().initialize(vertx)
@@ -45,11 +32,91 @@ public class MainVerticle extends AbstractVerticle {
               .listen(8888)
               .onSuccess(http -> {
                 System.out.println("HTTP server running on port 8888");
-                startPromise.complete();
+
+                // Wait 3 seconds before registering Event Bus consumers to allow cluster state
+                // to propagate
+                vertx.setTimer(3000, id -> {
+                  registerEventBusConsumer();
+                  System.out.println("[Service1:8888] Delayed Event Bus consumer registration complete (3s delay)");
+                  startPromise.complete();
+                });
               })
               .onFailure(startPromise::fail);
         })
         .onFailure(startPromise::fail);
+  }
+
+  /**
+   * Register Event Bus consumers after cluster is ready
+   */
+  private void registerEventBusConsumer() {
+    // Consumer for resource lookup requests
+    vertx.eventBus().consumer("resource.lookup", message -> {
+      String resourceId = message.body().toString();
+      List<JsonObject> versions = localStore.get(resourceId);
+
+      System.out.println("[Service1:8888] Received clustered Event Bus lookup request for ID: " + resourceId);
+
+      if (versions != null && !versions.isEmpty()) {
+        // Find the latest version by timestamp
+        JsonObject latest = versions.stream()
+            .max(Comparator.comparing(obj -> obj.getString("timestamp")))
+            .orElse(null);
+        if (latest != null) {
+          String value = latest.getString("value");
+          String timestamp = latest.getString("timestamp");
+          System.out
+              .println("[Service1:8888] Found latest resource locally: " + value + " (stored at: " + timestamp + ")");
+          JsonObject response = new JsonObject()
+              .put("value", value)
+              .put("timestamp", timestamp)
+              .put("port", 8888);
+          message.reply(response);
+          return;
+        }
+      }
+      System.out.println("[Service1:8888] Resource not found in local store");
+      message.fail(404, "Resource not found");
+    });
+
+    // Consumer for resource store requests
+    vertx.eventBus().consumer("resource.store", message -> {
+      JsonObject storeRequest = (JsonObject) message.body();
+      String resourceId = storeRequest.getString("id");
+      String value = storeRequest.getString("value");
+
+      System.out.println("[Service1:8888] Received clustered Event Bus store request for ID: " + resourceId);
+
+      // Create timestamped data object
+      String currentTimestamp = java.time.Instant.now().toString();
+      JsonObject dataWithTimestamp = new JsonObject()
+          .put("value", value)
+          .put("timestamp", currentTimestamp);
+
+      // Append new version to the list
+      localStore.compute(resourceId, (k, v) -> {
+        if (v == null)
+          v = new ArrayList<>();
+        v.add(dataWithTimestamp);
+        return v;
+      });
+      System.out
+          .println("[Service1:8888] Stored new version locally: " + value + " (timestamp: " + currentTimestamp + ")");
+
+      JsonObject response = new JsonObject()
+          .put("stored", resourceId)
+          .put("timestamp", currentTimestamp)
+          .put("port", 8888);
+      message.reply(response);
+    });
+
+    // Add a small delay to ensure cluster is fully ready before considering
+    // consumer ready
+    vertx.setTimer(1000, id -> {
+      System.out.println(
+          "[Service1:8888] Event Bus consumers 'resource.lookup' and 'resource.store' registered for clustering");
+      System.out.println("[Service1:8888] Event Bus consumers are ready to handle requests");
+    });
   }
 
   /**
@@ -70,13 +137,13 @@ public class MainVerticle extends AbstractVerticle {
     // Health check endpoint
     router.get("/api/v1/hello").handler(CrudHandler::handleHello);
 
-    // CRUD endpoints
-    router.post("/api/v1/resources").handler(CrudHandler::createResource);
-    router.get("/api/v1/resources/:id").handler(CrudHandler::getResourceById);
-    router.get("/api/v1/resources").handler(CrudHandler::getAllResources);
-    router.put("/api/v1/resources/:id").handler(CrudHandler::updateResource);
-    router.delete("/api/v1/resources/:id").handler(CrudHandler::deleteResource);
-    router.patch("/api/v1/resources/:id").handler(CrudHandler::patchResource);
+    // CRUD endpoints via Event Bus master verticle
+    router.post("/api/v1/resources").handler(com.example.api.handlers.CreateResourceHandler::handle);
+    router.get("/api/v1/resources/:id").handler(com.example.api.handlers.GetResourceHandler::handle);
+    router.get("/api/v1/resources").handler(com.example.api.handlers.ListResourcesHandler::handle);
+    router.put("/api/v1/resources/:id").handler(com.example.api.handlers.UpdateResourceHandler::handle);
+    router.delete("/api/v1/resources/:id").handler(com.example.api.handlers.DeleteResourceHandler::handle);
+    router.patch("/api/v1/resources/:id").handler(com.example.api.handlers.PatchResourceHandler::handle);
 
     // Swagger UI routes
     router.route("/docs/*").handler(StaticHandler.create("webroot/swagger-ui"));
@@ -96,7 +163,7 @@ public class MainVerticle extends AbstractVerticle {
   /**
    * Get access to the local store for this verticle
    */
-  public static ConcurrentHashMap<String, String> getLocalStore() {
+  public static ConcurrentHashMap<String, List<JsonObject>> getLocalStore() {
     return localStore;
   }
 
